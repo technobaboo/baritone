@@ -268,7 +268,8 @@ public class MovementDiagonal extends Movement {
 
         if (ctx.playerFeet().equals(dest)) {
             return state.setStatus(MovementStatus.SUCCESS);
-        } else if (!playerInValidPosition() && !(MovementHelper.isLiquid(ctx, src) && getValidPositions().contains(ctx.playerFeet().above()))) {
+        } else if (!playerInValidPosition() && !(MovementHelper.isLiquid(ctx, src) && getValidPositions().contains(ctx.playerFeet().above()))
+                && !beelineTolerated()) {
             return state.setStatus(MovementStatus.UNREACHABLE);
         }
         if (dest.y > src.y && ctx.player().position().y < src.y + 0.1 && ctx.player().horizontalCollision) {
@@ -280,6 +281,22 @@ public class MovementDiagonal extends Movement {
         state.setInput(Input.SNEAK, Baritone.settings().allowWalkOnMagmaBlocks.value && MovementHelper.steppingOnBlocks(ctx).stream().anyMatch(block -> ctx.world().getBlockState(block).is(Blocks.MAGMA_BLOCK)));
         MovementHelper.moveTowards(ctx, state, dest);
         return state;
+    }
+
+    /**
+     * With beelining cutting corners, our feet can briefly be in a column that isn't one of
+     * this movement's valid positions — the path executor has already verified the cut walkable.
+     * Tolerate it while we're at path height and near the destination; the executor's own
+     * distance-from-path checks still catch genuinely straying off course.
+     */
+    private boolean beelineTolerated() {
+        if (!Baritone.settings().beeline.value) {
+            return false;
+        }
+        if (Math.abs(ctx.playerFeet().y - dest.y) > 1) {
+            return false;
+        }
+        return Math.hypot(ctx.player().position().x - (dest.x + 0.5), ctx.player().position().z - (dest.z + 0.5)) < 3;
     }
 
     private boolean sprint() {

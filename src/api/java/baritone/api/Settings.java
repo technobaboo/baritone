@@ -386,6 +386,33 @@ public final class Settings {
     public final Setting<Boolean> overshootTraverse = new Setting<>(true);
 
     /**
+     * Beeline path execution with pure-pursuit steering: instead of walking to the center of
+     * every block, aim at the farthest upcoming path position that can be reached in a straight
+     * line, after verifying every block column that line's swept hitbox passes over is safe to
+     * walk through. This melts corners and straightens the zigzag runs the 8-direction grid path
+     * produces. The calculated path itself is unchanged; this only affects how it is followed, and
+     * only while plainly walking flat traverse/diagonal movements, 1-block ascends (jumping as the
+     * step comes in range instead of squaring up to it), and 1-block descends (unless the descend
+     * is in safe mode before a risky edge).
+     */
+    public final Setting<Boolean> beeline = new Setting<>(true);
+
+    /**
+     * Pure-pursuit lookahead distance in blocks for beelining. Higher values cut corners more
+     * aggressively and straighten longer zigzag runs. Unclamped.
+     */
+    public final Setting<Double> beelineRadius = new Setting<>(8.0);
+
+    /**
+     * How far (in blocks) a beeline may deviate from the calculated path. Every path position the
+     * cut skips must lie within this distance of the straight line. The whole cut is still
+     * verified walkable block-by-block regardless, but large values let the beeline take
+     * shortcuts across areas the path calculation never inspected (and stray further from
+     * whatever the path was routing around).
+     */
+    public final Setting<Double> beelineMaxDeviation = new Setting<>(1.8);
+
+    /**
      * When breaking blocks for a movement, wait until all falling blocks have settled before continuing
      */
     public final Setting<Boolean> pauseMiningForFallingBlocks = new Setting<>(true);
@@ -693,6 +720,13 @@ public final class Settings {
      * Render the path
      */
     public final Setting<Boolean> renderPath = new Setting<>(true);
+
+    /**
+     * Render the beeline that will actually be followed, overlaid on the path, plus a line to the
+     * live aim point while beelining is steering. Only has an effect while {@link #beeline} and
+     * {@link #renderPath} are enabled.
+     */
+    public final Setting<Boolean> renderBeeline = new Setting<>(true);
 
     /**
      * Render the path as a line instead of a frickin thingy
@@ -1322,6 +1356,11 @@ public final class Settings {
      * The color of the next path
      */
     public final Setting<Color> colorNextPath = new Setting<>(Color.MAGENTA);
+
+    /**
+     * The color of the beeline (and live aim line) when beelining is enabled
+     */
+    public final Setting<Color> colorBeeline = new Setting<>(Color.YELLOW);
 
     /**
      * The color of the blocks to break

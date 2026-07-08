@@ -30,6 +30,7 @@ import baritone.pathing.calc.AbstractNodeCostSearch;
 import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.Movement;
 import baritone.pathing.movement.MovementHelper;
+import baritone.pathing.movement.MovementState;
 import baritone.pathing.movement.movements.*;
 import baritone.utils.BlockStateInterface;
 import net.minecraft.core.BlockPos;
@@ -49,6 +50,13 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     private static final double MAX_MAX_DIST_FROM_PATH = 3;
     private static final double MAX_DIST_FROM_PATH = 2;
+
+    /**
+     * Hard distance cap while a beeline is engaged. An engaged beeline re-verifies a straight
+     * walkable line back to the path every tick, so the usual limits don't apply — cuts routinely
+     * sit 2+ blocks from the nearest path position — but past this even a verified cut is fishy.
+     */
+    private static final double MAX_DIST_FROM_PATH_BEELINE = 6;
 
     /**
      * Default value is equal to 10 seconds. It's find to decrease it, but it must be at least 5.5s (110 ticks).
@@ -76,6 +84,18 @@ public class PathExecutor implements IPathExecutor, Helper {
 
     private boolean sprintNextTick;
 
+    /**
+     * The aim point beelining targeted this tick, or null if it didn't
+     * engage. Written on the game thread, read by the render thread for debug visualization.
+     */
+    private volatile Vec3 beelineAim;
+
+    /**
+     * The predicted beeline trajectory (world coordinates, at path render height) for the
+     * upcoming portion of the path, recomputed each tick. Null when beelining is disabled.
+     */
+    private volatile List<Vec3> beelineRenderPath;
+
     public PathExecutor(PathingBehavior behavior, IPath path) {
         this.behavior = behavior;
         this.ctx = behavior.ctx;
@@ -96,9 +116,10 @@ public class PathExecutor implements IPathExecutor, Helper {
         if (pathPosition >= path.length()) {
             return true; // stop bugging me, I'm done
         }
+        advanceThroughBeeline();
         Movement movement = (Movement) path.movements().get(pathPosition);
         BetterBlockPos whereAmI = ctx.playerFeet();
-        if (!movement.getValidPositions().contains(whereAmI)) {
+        if (!movement.getValidPositions().contains(whereAmI) && !withinBeelineCorridor(movement, whereAmI)) {
             for (int i = 0; i < pathPosition && i < path.length(); i++) {//this happens for example when you lag out and get teleported back a couple blocks
                 if (((Movement) path.movements().get(i)).getValidPositions().contains(whereAmI)) {
                     int previousPos = pathPosition;
@@ -126,18 +147,28 @@ public class PathExecutor implements IPathExecutor, Helper {
             }
         }
         Tuple<Double, BlockPos> status = closestPathPos(path);
+        // an engaged beeline (aim found last tick) re-verified a straight walkable line back to
+        // the path from where we stand, so distance from the raw path doesn't mean we're lost —
+        // cuts routinely exceed the normal limits. Judge against the beeline instead: engaged
+        // means fine (within a hard cap), disengaged means the normal strictness applies.
+        boolean beelining = Baritone.settings().beeline.value && beelineAim != null;
         if (possiblyOffPath(status, MAX_DIST_FROM_PATH)) {
-            ticksAway++;
-            System.out.println("FAR AWAY FROM PATH FOR " + ticksAway + " TICKS. Current distance: " + status.getA() + ". Threshold: " + MAX_DIST_FROM_PATH);
-            if (ticksAway > MAX_TICKS_AWAY) {
-                logDebug("Too far away from path for too long, cancelling path");
-                cancel();
-                return false;
+            if (beelining) {
+                ticksAway = 0;
+            } else {
+                ticksAway++;
+                System.out.println("FAR AWAY FROM PATH FOR " + ticksAway + " TICKS. Current distance: " + status.getA() + ". Threshold: " + MAX_DIST_FROM_PATH);
+                if (ticksAway > MAX_TICKS_AWAY) {
+                    logDebug("Too far away from path for too long, cancelling path");
+                    cancel();
+                    return false;
+                }
             }
         } else {
             ticksAway = 0;
         }
-        if (possiblyOffPath(status, MAX_MAX_DIST_FROM_PATH)) { // ok, stop right away, we're way too far.
+        double beelineCap = Math.max(MAX_DIST_FROM_PATH_BEELINE, Baritone.settings().beelineMaxDeviation.value + 2);
+        if (possiblyOffPath(status, beelining ? beelineCap : MAX_MAX_DIST_FROM_PATH)) { // ok, stop right away, we're way too far.
             logDebug("too far from path");
             cancel();
             return false;
@@ -238,6 +269,8 @@ public class PathExecutor implements IPathExecutor, Helper {
             if (!sprintNextTick) {
                 ctx.player().setSprinting(false); // letting go of control doesn't make you stop sprinting actually
             }
+            beelineSteering(movement);
+            beelineRenderPath = computeBeelineRenderPath();
             ticksOnCurrent++;
             if (ticksOnCurrent > currentMovementOriginalCostEstimate + Baritone.settings().movementTimeoutTicks.value) {
                 // only cancel if the total time has exceeded the initial estimate
@@ -575,6 +608,341 @@ public class PathExecutor implements IPathExecutor, Helper {
             return true;
         }
         return next instanceof MovementDiagonal && Baritone.settings().allowOvershootDiagonalDescend.value;
+    }
+
+    /**
+     * Pure-pursuit steering: aim at the farthest upcoming path position that is within the
+     * lookahead radius and reachable in a straight line whose swept hitbox is verified walkable.
+     * This melts corners and straightens zigzag runs instead of walking to the center of every
+     * block. Only applies while plainly walking flat traverse/diagonal movements and 1-block
+     * ascends/descends; if any condition fails we fall back to the movement's own exact steering
+     * for that tick.
+     */
+    private void beelineSteering(Movement movement) {
+        beelineAim = null;
+        if (!Baritone.settings().beeline.value) {
+            return;
+        }
+        if (!isBeelineable(movement)) {
+            return;
+        }
+        MovementState.MovementTarget target = movement.getState().getTarget();
+        if (!target.getRotation().isPresent() || target.hasToForceRotations()) {
+            return; // breaking, placing, or interacting; the movement needs its exact rotations
+        }
+        if (MovementHelper.isLiquid(ctx, ctx.playerFeet())) {
+            return;
+        }
+        // keep steering through the hop of a beelined 1-block step or drop — releasing the aim
+        // mid-air lets the movement's own steering yank the trajectory toward its block center and
+        // we land off the line. Only a real fall (past 1-block-drop speed) disengages.
+        if (!ctx.player().onGround() && ctx.player().getDeltaMovement().y < -0.6) {
+            return;
+        }
+        int runEnd = beelineRunEndMovement();
+        if (runEnd <= pathPosition) {
+            return;
+        }
+        Vec3 playerPos = ctx.player().position();
+        Vec3 aim = pursuitAim(playerPos, runEnd);
+        if (aim == null) {
+            return;
+        }
+        Rotation rotation = RotationUtils.calcRotationFromVec3d(
+                ctx.playerHead(),
+                aim,
+                ctx.playerRotations()
+        ).withPitch(ctx.playerRotations().getPitch());
+        // last updateTarget call in the tick wins, overriding the aim the movement just set
+        behavior.baritone.getLookBehavior().updateTarget(rotation, false);
+        beelineAim = aim;
+        // ascends approached at an angle won't trigger the movement's own jump logic, so time the
+        // jump ourselves; the corridor check already verified headroom for it
+        if (ctx.player().onGround()
+                && (aim.y - 0.5 > ctx.playerFeet().y || movement instanceof MovementAscend)
+                && shouldJumpForStep(playerPos, aim)) {
+            behavior.baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
+        }
+    }
+
+    /**
+     * Jump timing for beelined steps: jump when a 1-high step face is imminent along our actual
+     * motion, instead of waiting for the collision — bumping the step first costs sprint momentum
+     * and mistimes the hop when running up slopes at an angle.
+     */
+    private boolean shouldJumpForStep(Vec3 playerPos, Vec3 aim) {
+        if (ctx.player().horizontalCollision) {
+            return true; // already pressed against the step
+        }
+        Vec3 vel = ctx.player().getDeltaMovement();
+        double speed = Math.hypot(vel.x, vel.z);
+        double dirX;
+        double dirZ;
+        if (speed > 0.08) {
+            dirX = vel.x / speed;
+            dirZ = vel.z / speed;
+        } else {
+            double dx = aim.x - playerPos.x;
+            double dz = aim.z - playerPos.z;
+            double len = Math.hypot(dx, dz);
+            if (len < 0.001) {
+                return false;
+            }
+            dirX = dx / len;
+            dirZ = dz / len;
+        }
+        int feetY = ctx.playerFeet().y;
+        // probe just beyond the hitbox edge along our motion for a step we can land on
+        for (double lead : new double[]{0.45, 0.75}) {
+            BetterBlockPos ahead = new BetterBlockPos(
+                    (int) Math.floor(playerPos.x + dirX * lead),
+                    feetY,
+                    (int) Math.floor(playerPos.z + dirZ * lead));
+            if (!MovementHelper.canWalkThrough(ctx, ahead)
+                    && MovementHelper.canWalkOn(ctx, ahead)
+                    && MovementHelper.canWalkThrough(ctx, ahead.above())
+                    && MovementHelper.canWalkThrough(ctx, ahead.above(2))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * The farthest path position (as a centered aim point) within the lookahead radius that can be
+     * reached from the player in a straight verified-walkable line, or null if not even the next
+     * position can. The position immediately ahead is always considered regardless of radius so
+     * beelining degrades gracefully to per-block steering. Chords may rise or drop at most one
+     * level, and must stay near the calculated path so the executor's distance-from-path safety
+     * checks can't trip on a beeline.
+     */
+    private Vec3 pursuitAim(Vec3 from, int runEndMovement) {
+        double lookahead = Math.max(1, Baritone.settings().beelineRadius.value);
+        int feetY = ctx.playerFeet().y;
+        for (int i = runEndMovement; i > pathPosition; i--) { // positions index i = dest of movement i-1
+            BetterBlockPos pos = positionsAt(i);
+            if (Math.abs(pos.y - feetY) > 1) {
+                continue;
+            }
+            double px = pos.x + 0.5;
+            double pz = pos.z + 0.5;
+            if (Math.hypot(px - from.x, pz - from.z) > lookahead && i > pathPosition + 1) {
+                continue;
+            }
+            if (!chordNearPath(from.x, from.z, px, pz, pathPosition, i)) {
+                continue;
+            }
+            if (cutIsWalkable(from, px, pz, feetY, pos.y)) {
+                return new Vec3(px, pos.y + 0.5, pz);
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether every skipped path position stays within beelineMaxDeviation blocks of the straight
+     * cut, bounding how far the beeline strays from the calculated path.
+     */
+    private boolean chordNearPath(double x1, double z1, double x2, double z2, int fromIdx, int toIdx) {
+        double maxDeviation = Baritone.settings().beelineMaxDeviation.value;
+        double maxDeviationSq = maxDeviation * maxDeviation;
+        double dx = x2 - x1;
+        double dz = z2 - z1;
+        double lenSq = dx * dx + dz * dz;
+        for (int j = fromIdx + 1; j < toIdx; j++) {
+            BetterBlockPos p = positionsAt(j);
+            double px = p.x + 0.5 - x1;
+            double pz = p.z + 0.5 - z1;
+            double t = lenSq == 0 ? 0 : Math.max(0, Math.min(1, (px * dx + pz * dz) / lenSq));
+            double ex = px - t * dx;
+            double ez = pz - t * dz;
+            if (ex * ex + ez * ez > maxDeviationSq) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * @return The exclusive end index of the run of consecutive beelineable movements
+     * starting at pathPosition, capped 20 movements ahead. Positions up to and including this
+     * index are covered by the run.
+     */
+    private int beelineRunEndMovement() {
+        int i = pathPosition;
+        while (i < path.movements().size() && isBeelineable((Movement) path.movements().get(i))) {
+            i++;
+        }
+        return i;
+    }
+
+    /**
+     * While pursuit steering cuts across blocks that aren't on the path, the player's feet can
+     * briefly be in a column no movement claims as a valid position. That's expected — the cut was
+     * verified walkable — so don't let the position-recovery scans treat it as being lost, as long
+     * as we're at path height and still near the current movement's destination. The executor's
+     * distance-from-path checks remain in force.
+     */
+    private boolean withinBeelineCorridor(Movement movement, BetterBlockPos whereAmI) {
+        if (!Baritone.settings().beeline.value || !isBeelineable(movement)) {
+            return false;
+        }
+        BetterBlockPos dest = movement.getDest();
+        if (Math.abs(whereAmI.y - dest.y) > 1) {
+            return false;
+        }
+        return Math.hypot(ctx.player().position().x - (dest.x + 0.5), ctx.player().position().z - (dest.z + 0.5)) < 3;
+    }
+
+    /**
+     * When pursuit steering cuts corners, the player can enter the blocks of movements further
+     * along the path without ever standing exactly on the intermediate destinations. Jump the path
+     * position forward to the latest movement of the beelineable run whose valid positions contain
+     * the player, so skipped movements don't stall waiting for a block we'll never stand on.
+     */
+    private void advanceThroughBeeline() {
+        if (!Baritone.settings().beeline.value) {
+            return;
+        }
+        BetterBlockPos whereAmI = ctx.playerFeet();
+        int runEnd = beelineRunEndMovement();
+        for (int i = runEnd - 1; i > pathPosition; i--) {
+            if (((Movement) path.movements().get(i)).getValidPositions().contains(whereAmI)) {
+                pathPosition = i;
+                onChangeInPathPosition();
+                break;
+            }
+        }
+    }
+
+    /**
+     * Predicts the trajectory pursuit steering will take, for debug rendering: a greedy
+     * string-pull along the beelineable run using the same walkability corridor test as the live
+     * steering. Corners drawn as cut are ones that will actually be cut.
+     */
+    private List<Vec3> computeBeelineRenderPath() {
+        if (!Baritone.settings().beeline.value || !Baritone.settings().renderBeeline.value) {
+            return null;
+        }
+        int runEnd = beelineRunEndMovement();
+        if (runEnd <= pathPosition) {
+            return null;
+        }
+        int curY = ctx.playerFeet().y;
+        double lookahead = Math.max(1, Baritone.settings().beelineRadius.value);
+        List<Vec3> points = new ArrayList<>();
+        Vec3 cur = ctx.player().position();
+        points.add(new Vec3(cur.x, curY + 0.5, cur.z));
+        int idx = pathPosition;
+        while (idx < runEnd) {
+            int advanced = idx + 1;
+            for (int i = runEnd; i > idx; i--) {
+                BetterBlockPos pos = positionsAt(i);
+                if (Math.abs(pos.y - curY) > 1) {
+                    continue;
+                }
+                double px = pos.x + 0.5;
+                double pz = pos.z + 0.5;
+                if (Math.hypot(px - cur.x, pz - cur.z) > lookahead && i > idx + 1) {
+                    continue;
+                }
+                if (!chordNearPath(cur.x, cur.z, px, pz, idx, i)) {
+                    continue;
+                }
+                if (cutIsWalkable(cur, px, pz, curY, pos.y)) {
+                    advanced = i;
+                    break;
+                }
+            }
+            BetterBlockPos pos = positionsAt(advanced);
+            cur = new Vec3(pos.x + 0.5, pos.y + 0.5, pos.z + 0.5);
+            curY = pos.y;
+            points.add(cur);
+            idx = advanced;
+        }
+        return points;
+    }
+
+    private BetterBlockPos positionsAt(int i) {
+        return path.positions().get(i);
+    }
+
+    /**
+     * @return The predicted beeline for debug rendering, or null
+     */
+    public List<Vec3> getBeelineRenderPath() {
+        return beelineRenderPath;
+    }
+
+    /**
+     * @return The aim point beelining targeted this tick, or null if it didn't engage
+     */
+    public Vec3 getBeelineAim() {
+        return beelineAim;
+    }
+
+    private boolean isBeelineable(Movement movement) {
+        boolean flat = (movement instanceof MovementTraverse || movement instanceof MovementDiagonal)
+                && movement.getDirection().getY() == 0;
+        boolean stepUp = movement instanceof MovementAscend && movement.getDirection().getY() == 1;
+        // a descend in safe mode is deliberately slowing before a risky edge; leave it alone
+        boolean stepDown = movement instanceof MovementDescend && movement.getDirection().getY() == -1
+                && !((MovementDescend) movement).safeMode();
+        if (!flat && !stepUp && !stepDown) {
+            return false;
+        }
+        // these caches are refreshed every tick for movements within 10 of pathPosition
+        return movement.toBreakCached != null && movement.toBreakCached.isEmpty()
+                && movement.toPlaceCached != null && movement.toPlaceCached.isEmpty()
+                && movement.toWalkIntoCached != null && movement.toWalkIntoCached.isEmpty();
+    }
+
+    /**
+     * Whether the straight line from {@code from} to the aim point sweeps only walkable columns.
+     * When the endpoints differ by one level (a 1-block jump somewhere along the cut), each column
+     * may be walkable at either level, but lower-level columns must also have jump headroom since
+     * the jump can happen anywhere along the cut.
+     */
+    private boolean cutIsWalkable(Vec3 from, double aimX, double aimZ, int yFrom, int yTo) {
+        int yLow = Math.min(yFrom, yTo);
+        int yHigh = Math.max(yFrom, yTo);
+        if (yHigh - yLow > 1) {
+            return false;
+        }
+        boolean stepped = yHigh != yLow;
+        double dx = aimX - from.x;
+        double dz = aimZ - from.z;
+        int steps = Math.max(1, (int) Math.ceil(Math.hypot(dx, dz) / 0.25));
+        for (int i = 0; i <= steps; i++) {
+            double px = from.x + dx * i / steps;
+            double pz = from.z + dz * i / steps;
+            // every block column the player's 0.6 wide hitbox overlaps at this point on the line
+            int minX = (int) Math.floor(px - 0.301);
+            int maxX = (int) Math.floor(px + 0.301);
+            int minZ = (int) Math.floor(pz - 0.301);
+            int maxZ = (int) Math.floor(pz + 0.301);
+            for (int x = minX; x <= maxX; x++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    boolean ok = stepped
+                            ? columnIsWalkable(x, yLow, z, true) || columnIsWalkable(x, yHigh, z, false)
+                            : columnIsWalkable(x, yLow, z, false);
+                    if (!ok) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean columnIsWalkable(int x, int y, int z, boolean jumpHeadroom) {
+        BetterBlockPos feet = new BetterBlockPos(x, y, z);
+        return MovementHelper.canWalkThrough(ctx, feet)
+                && MovementHelper.canWalkThrough(ctx, feet.above())
+                && (!jumpHeadroom || MovementHelper.canWalkThrough(ctx, feet.above(2)))
+                && !MovementHelper.avoidWalkingInto(BlockStateInterface.get(ctx, feet))
+                && !MovementHelper.avoidWalkingInto(BlockStateInterface.get(ctx, feet.above()))
+                && MovementHelper.canWalkOn(ctx, feet.below());
     }
 
     private void onChangeInPathPosition() {

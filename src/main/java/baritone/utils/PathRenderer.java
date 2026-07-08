@@ -35,6 +35,7 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.dimension.DimensionType;
 import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.Shapes;
 import net.minecraft.world.phys.shapes.VoxelShape;
 import org.jetbrains.annotations.Nullable;
@@ -113,6 +114,19 @@ public final class PathRenderer implements IRenderer {
             drawPath(event.getModelViewStack(), current.getPath().positions(), renderBegin, settings.colorCurrentPath.value, settings.fadePath.value, 10, 20);
         }
 
+        // Debug overlay for beelining: the predicted beeline, and the live aim line
+        if (current != null && settings.beeline.value && settings.renderBeeline.value) {
+            List<Vec3> beeline = current.getBeelineRenderPath();
+            if (beeline != null && beeline.size() >= 2) {
+                drawBeeline(event.getModelViewStack(), beeline, settings.colorBeeline.value);
+            }
+            Vec3 aim = current.getBeelineAim();
+            if (aim != null) {
+                Vec3 feet = ctx.player().getPosition(partialTicks).add(0, 0.5, 0);
+                drawBeeline(event.getModelViewStack(), Arrays.asList(feet, aim), settings.colorBeeline.value);
+            }
+        }
+
         if (next != null && next.getPath() != null) {
             drawPath(event.getModelViewStack(), next.getPath().positions(), 0, settings.colorNextPath.value, settings.fadePath.value, 10, 20);
         }
@@ -172,6 +186,23 @@ public final class PathRenderer implements IRenderer {
             emitPathLine(bufferBuilder, stack, start.x, start.y, start.z, end.x, end.y, end.z, offset);
         }
 
+        IRenderer.endLines(bufferBuilder, settings.renderPathIgnoreDepth.value);
+    }
+
+    public static void drawBeeline(PoseStack stack, List<Vec3> points, Color color) {
+        BufferBuilder bufferBuilder = IRenderer.startLines(color);
+        double vpX = posX();
+        double vpY = posY();
+        double vpZ = posZ();
+        for (int i = 0; i < points.size() - 1; i++) {
+            Vec3 start = points.get(i);
+            Vec3 end = points.get(i + 1);
+            IRenderer.emitLine(bufferBuilder, stack,
+                    start.x - vpX, start.y - vpY, start.z - vpZ,
+                    end.x - vpX, end.y - vpY, end.z - vpZ,
+                    settings.pathRenderLineWidthPixels.value
+            );
+        }
         IRenderer.endLines(bufferBuilder, settings.renderPathIgnoreDepth.value);
     }
 
