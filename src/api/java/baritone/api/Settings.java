@@ -408,9 +408,24 @@ public final class Settings {
      * cut skips must lie within this distance of the straight line. The whole cut is still
      * verified walkable block-by-block regardless, but large values let the beeline take
      * shortcuts across areas the path calculation never inspected (and stray further from
-     * whatever the path was routing around).
+     * whatever the path was routing around). Ignored when {@link #beelineDirectToGoal} is on.
      */
     public final Setting<Double> beelineMaxDeviation = new Setting<>(1.8);
+
+    /**
+     * Trust the walkability sweep completely: aim for the farthest path position with a straight
+     * walkable line regardless of lookahead radius or deviation from the path, found by bisecting
+     * along the path (try the end, halve on failure, then refine). Big speedups on open terrain;
+     * the cut still gets verified walkable block-by-block every tick, but it may stray arbitrarily
+     * far from whatever the calculated path was routing around.
+     */
+    public final Setting<Boolean> beelineDirectToGoal = new Setting<>(false);
+
+    /**
+     * Keep sprinting through beeline direction changes up to this many degrees (between current
+     * velocity and the aim). Beyond it, the executor's normal sprint decisions apply.
+     */
+    public final Setting<Double> beelineMaxSprintTurn = new Setting<>(30.0);
 
     /**
      * When breaking blocks for a movement, wait until all falling blocks have settled before continuing

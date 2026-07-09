@@ -20,6 +20,9 @@ package baritone.pathing.movement.movements;
 import baritone.Baritone;
 import baritone.api.IBaritone;
 import baritone.api.pathing.movement.MovementStatus;
+import baritone.api.pathing.path.IPathExecutor;
+import baritone.behavior.PathingBehavior;
+import baritone.pathing.path.BeelinePathExecutor;
 import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.CalculationContext;
@@ -295,6 +298,11 @@ public class MovementDiagonal extends Movement {
         }
         if (Math.abs(ctx.playerFeet().y - dest.y) > 1) {
             return false;
+        }
+        IPathExecutor executor = ((PathingBehavior) baritone.getPathingBehavior()).getCurrent();
+        if (executor instanceof BeelinePathExecutor && ((BeelinePathExecutor) executor).getBeelineAim() != null) {
+            // an engaged beeline re-verified its line this tick; distance from our dest is expected
+            return true;
         }
         return Math.hypot(ctx.player().position().x - (dest.x + 0.5), ctx.player().position().z - (dest.z + 0.5)) < 3;
     }

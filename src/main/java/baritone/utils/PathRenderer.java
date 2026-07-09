@@ -24,6 +24,7 @@ import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.IPlayerContext;
 import baritone.api.utils.interfaces.IGoalRenderPos;
 import baritone.behavior.PathingBehavior;
+import baritone.pathing.path.BeelinePathExecutor;
 import baritone.pathing.path.PathExecutor;
 import com.mojang.blaze3d.vertex.BufferBuilder;
 import com.mojang.blaze3d.vertex.PoseStack;
@@ -115,12 +116,13 @@ public final class PathRenderer implements IRenderer {
         }
 
         // Debug overlay for beelining: the predicted beeline, and the live aim line
-        if (current != null && settings.beeline.value && settings.renderBeeline.value) {
-            List<Vec3> beeline = current.getBeelineRenderPath();
+        if (current instanceof BeelinePathExecutor && settings.beeline.value && settings.renderBeeline.value) {
+            BeelinePathExecutor beeliner = (BeelinePathExecutor) current;
+            List<Vec3> beeline = beeliner.getBeelineRenderPath();
             if (beeline != null && beeline.size() >= 2) {
                 drawBeeline(event.getModelViewStack(), beeline, settings.colorBeeline.value);
             }
-            Vec3 aim = current.getBeelineAim();
+            Vec3 aim = beeliner.getBeelineAim();
             if (aim != null) {
                 Vec3 feet = ctx.player().getPosition(partialTicks).add(0, 0.5, 0);
                 drawBeeline(event.getModelViewStack(), Arrays.asList(feet, aim), settings.colorBeeline.value);

@@ -32,6 +32,7 @@ import baritone.pathing.calc.AStarPathFinder;
 import baritone.pathing.calc.AbstractNodeCostSearch;
 import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.MovementHelper;
+import baritone.pathing.path.BeelinePathExecutor;
 import baritone.pathing.path.PathExecutor;
 import baritone.utils.PathRenderer;
 import baritone.utils.PathingCommandContext;
@@ -509,7 +510,7 @@ public final class PathingBehavior extends Behavior implements IPathingBehavior,
 
             PathCalculationResult calcResult = pathfinder.calculate(primaryTimeout, failureTimeout);
             synchronized (pathPlanLock) {
-                Optional<PathExecutor> executor = calcResult.getPath().map(p -> new PathExecutor(PathingBehavior.this, p));
+                Optional<PathExecutor> executor = calcResult.getPath().map(p -> new BeelinePathExecutor(PathingBehavior.this, p));
                 if (current == null) {
                     if (executor.isPresent()) {
                         if (executor.get().getPath().positions().contains(expectedSegmentStart)) {
