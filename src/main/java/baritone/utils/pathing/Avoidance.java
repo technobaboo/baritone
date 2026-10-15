@@ -53,6 +53,26 @@ public class Avoidance {
         this.radiusSq = radius * radius;
     }
 
+    public int centerX() {
+        return centerX;
+    }
+
+    public int centerY() {
+        return centerY;
+    }
+
+    public int centerZ() {
+        return centerZ;
+    }
+
+    public double coefficient() {
+        return coefficient;
+    }
+
+    public int radius() {
+        return radius;
+    }
+
     public double coefficient(int x, int y, int z) {
         int xDiff = x - centerX;
         int yDiff = y - centerY;

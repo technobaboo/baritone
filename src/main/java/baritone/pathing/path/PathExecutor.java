@@ -114,11 +114,14 @@ public class PathExecutor implements IPathExecutor, Helper {
     }
 
     /**
-     * Hook for subclasses: called each tick while the current movement is RUNNING, after vanilla
-     * sprint logic has set {@link #sprintNextTick} and before it takes effect. May steer, adjust
-     * {@link #sprintNextTick}, or reset {@link #ticksOnCurrent}.
+     * Hook for subclasses: take exclusive control of the player for this tick instead of the
+     * current movement. When this returns true the movement is not updated at all — the subclass
+     * owns rotation, inputs, and {@link #sprintNextTick} — and only the overall movement timeout
+     * still applies. Called in place of movement.update(), after all world/cost sanity checks.
      */
-    protected void onMovementTick(Movement movement) {}
+    protected boolean takeFullControl(Movement movement) {
+        return false;
+    }
 
     /**
      * Hook for subclasses: the executor class to instantiate when this path is spliced or
@@ -271,6 +274,18 @@ public class PathExecutor implements IPathExecutor, Helper {
             clearKeys();
             return true;
         }
+        if (takeFullControl(movement)) {
+            // the subclass steers the player directly this tick; the movement is not consulted at
+            // all — its per-tick judgments assume the grid-following that the controller is
+            // deliberately not doing. The movement timeout still applies as a last-resort escape.
+            ticksOnCurrent++;
+            if (ticksOnCurrent > currentMovementOriginalCostEstimate + Baritone.settings().movementTimeoutTicks.value) {
+                logDebug("This movement has taken too long (" + ticksOnCurrent + " ticks, expected " + currentMovementOriginalCostEstimate + "). Cancelling.");
+                cancel();
+                return true;
+            }
+            return canCancel;
+        }
         MovementStatus movementStatus = movement.update();
         if (movementStatus == UNREACHABLE || movementStatus == FAILED) {
             logDebug("Movement returns status " + movementStatus);
@@ -285,7 +300,6 @@ public class PathExecutor implements IPathExecutor, Helper {
             return true;
         } else {
             sprintNextTick = shouldSprintNextTick();
-            onMovementTick(movement);
             if (!sprintNextTick) {
                 ctx.player().setSprinting(false); // letting go of control doesn't make you stop sprinting actually
             }

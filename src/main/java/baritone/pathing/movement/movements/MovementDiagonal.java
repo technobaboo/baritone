@@ -20,9 +20,6 @@ package baritone.pathing.movement.movements;
 import baritone.Baritone;
 import baritone.api.IBaritone;
 import baritone.api.pathing.movement.MovementStatus;
-import baritone.api.pathing.path.IPathExecutor;
-import baritone.behavior.PathingBehavior;
-import baritone.pathing.path.BeelinePathExecutor;
 import baritone.api.utils.BetterBlockPos;
 import baritone.api.utils.input.Input;
 import baritone.pathing.movement.CalculationContext;
@@ -287,10 +284,10 @@ public class MovementDiagonal extends Movement {
     }
 
     /**
-     * With beelining cutting corners, our feet can briefly be in a column that isn't one of
-     * this movement's valid positions — the path executor has already verified the cut walkable.
-     * Tolerate it while we're at path height and near the destination; the executor's own
-     * distance-from-path checks still catch genuinely straying off course.
+     * With beelining cutting corners, control can hand back to this movement while the player is
+     * mid-corridor, briefly in a column that isn't one of its valid positions. Tolerate it while
+     * at path height and near the destination; the executor's distance-from-path checks still
+     * catch genuinely straying off course.
      */
     private boolean beelineTolerated() {
         if (!Baritone.settings().beeline.value) {
@@ -298,11 +295,6 @@ public class MovementDiagonal extends Movement {
         }
         if (Math.abs(ctx.playerFeet().y - dest.y) > 1) {
             return false;
-        }
-        IPathExecutor executor = ((PathingBehavior) baritone.getPathingBehavior()).getCurrent();
-        if (executor instanceof BeelinePathExecutor && ((BeelinePathExecutor) executor).getBeelineAim() != null) {
-            // an engaged beeline re-verified its line this tick; distance from our dest is expected
-            return true;
         }
         return Math.hypot(ctx.player().position().x - (dest.x + 0.5), ctx.player().position().z - (dest.z + 0.5)) < 3;
     }

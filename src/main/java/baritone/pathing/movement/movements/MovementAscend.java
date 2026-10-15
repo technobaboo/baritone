@@ -26,7 +26,6 @@ import baritone.pathing.movement.CalculationContext;
 import baritone.pathing.movement.Movement;
 import baritone.pathing.movement.MovementHelper;
 import baritone.pathing.movement.MovementState;
-import baritone.pathing.path.BeelinePathExecutor;
 import baritone.utils.BlockStateInterface;
 import com.google.common.collect.ImmutableSet;
 import java.util.Set;
@@ -159,10 +158,8 @@ public class MovementAscend extends Movement {
 
     @Override
     public MovementState updateState(MovementState state) {
-        if (ctx.playerFeet().y < src.y && !BeelinePathExecutor.beelineEngaged(baritone)) {
-            // this check should run even when in preparing state (breaking blocks).
-            // an engaged beeline may legitimately route us below this movement's src mid-cut;
-            // the executor's own checks handle genuinely being lost
+        if (ctx.playerFeet().y < src.y) {
+            // this check should run even when in preparing state (breaking blocks)
             return state.setStatus(MovementStatus.UNREACHABLE);
         }
         super.updateState(state);

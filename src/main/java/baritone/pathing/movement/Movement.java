@@ -217,15 +217,6 @@ public abstract class Movement implements IMovement, MovementHelper {
     }
 
     /**
-     * @return The state as of the most recent {@link #update()}, used by the path executor to
-     * determine whether this movement is plainly walking (and can therefore be beelined)
-     * or doing something that requires exact rotations.
-     */
-    public MovementState getState() {
-        return currentState;
-    }
-
-    /**
      * Calculate latest movement state. Gets called once a tick.
      *
      * @param state The current state
